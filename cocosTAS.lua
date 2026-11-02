@@ -49,7 +49,10 @@ local S = {
 	dead = false,
 }
 local conns = {}
-local refreshUI, notify, refreshSaveList
+local refreshUI, notify, refreshSaveList, finishPlayback
+local menuManualVisible = true
+local playbackUiLocked = false
+local playbackHideToken = 0
 
 local function chr()
 	local c = lp.Character
@@ -116,11 +119,30 @@ local function interpolate(f, t)
 	local p0 = a.cf.Position
 	local p1 = b.cf.Position
 	local delta = p1 - p0
-	local maxTangent = delta.Magnitude * 2.5 + 0.05
 	local m0 = a.v * span
 	local m1 = b.v * span
-	if m0.Magnitude > maxTangent then m0 = m0.Unit * maxTangent end
-	if m1.Magnitude > maxTangent then m1 = m1.Unit * maxTangent end
+	local chordLength = delta.Magnitude
+	if chordLength < 1e-4 then
+		m0 = Vector3.zero
+		m1 = Vector3.zero
+	else
+		local direction = delta / chordLength
+		local along0 = m0:Dot(direction)
+		local along1 = m1:Dot(direction)
+		if along0 < 0 then m0 -= direction * along0 end
+		if along1 < 0 then m1 -= direction * along1 end
+		local maxTangent = chordLength * 3
+		if m0.Magnitude > maxTangent then m0 = m0.Unit * maxTangent end
+		if m1.Magnitude > maxTangent then m1 = m1.Unit * maxTangent end
+		local alpha = m0:Dot(direction) / chordLength
+		local beta = m1:Dot(direction) / chordLength
+		local tangentSum = alpha * alpha + beta * beta
+		if tangentSum > 9 then
+			local limiter = 3 / math.sqrt(tangentSum)
+			m0 *= limiter
+			m1 *= limiter
+		end
+	end
 	local k2 = k * k
 	local k3 = k2 * k
 	local h00 = 2 * k3 - 3 * k2 + 1
@@ -232,7 +254,14 @@ local function applySlow()
 end
 
 local function setPaused(p)
-	if S.paused == p then return end
+	if S.mode == "play" then
+		playbackHideToken += 1
+		playbackUiLocked = true
+	end
+	if S.paused == p then
+		if refreshUI then refreshUI() end
+		return
+	end
 	S.paused = p
 	local _, _, r = chr()
 	if r then
@@ -282,26 +311,10 @@ local function pushFrame(h, r, vreal)
 		local c = workspace.CurrentCamera
 		if c then fr.cam = c.CFrame; fr.fov = c.FieldOfView end
 	end
-	local previous = S.frames[#S.frames]
-	if previous and fr.t > previous.t + 1e-6 then
-		local mid = {
-			t = (previous.t + fr.t) * 0.5,
-			cf = previous.cf:Lerp(fr.cf, 0.5),
-			v = previous.v:Lerp(fr.v, 0.5),
-			s = fr.s,
-			mv = previous.mv:Lerp(fr.mv, 0.5),
-			j = previous.j or fr.j,
-		}
-		if previous.cam and fr.cam then
-			mid.cam = previous.cam:Lerp(fr.cam, 0.5)
-			mid.fov = previous.fov and fr.fov and (previous.fov + fr.fov) * 0.5 or fr.fov or previous.fov
-		end
-		S.frames[#S.frames + 1] = mid
-	end
 	S.frames[#S.frames + 1] = fr
 end
 
-local function stopAll()
+local function stopAll(keepPlaybackUIHidden)
 	local wasPlay = S.mode == "play"
 	S.mode = "idle"
 	S.stepReq = 0
@@ -310,6 +323,11 @@ local function stopAll()
 		local _, h = chr()
 		if h then h.AutoRotate = S.ar end
 		setControls(true)
+		if not keepPlaybackUIHidden then
+			playbackHideToken += 1
+			playbackUiLocked = false
+			menuManualVisible = true
+		end
 	end
 	restoreCam()
 	if S.paused then setPaused(false) end
@@ -317,6 +335,9 @@ local function stopAll()
 end
 
 local function startRecord()
+	playbackHideToken += 1
+	playbackUiLocked = false
+	menuManualVisible = true
 	local _, h, r = chr()
 	if not r then return notify("Нет персонажа") end
 	if S.mode ~= "idle" then stopAll() end
@@ -338,6 +359,8 @@ local function startPlay(paused)
 	if S.mode == "record" then S.mode = "idle"; S.stepReq = 0 end
 	if S.mode ~= "play" then
 		if S.paused then setPaused(false) end
+		playbackHideToken += 1
+		playbackUiLocked = true
 		S.mode = "play"
 		local _, h = chr()
 		if h then S.ar = h.AutoRotate; h.AutoRotate = false end
@@ -406,6 +429,9 @@ local function recordFromHere()
 	applyAt(S.gt)
 	local _, h = chr()
 	setPaused(true)
+	playbackHideToken += 1
+	playbackUiLocked = false
+	menuManualVisible = true
 	S.mode = "record"
 	S.stepReq = 0
 	local _, baseVelocity = interpolate(S.frames, S.gt)
@@ -717,6 +743,9 @@ for i, r in ipairs(raw.f) do
 		t = r[1],
 		cf = CFrame.new(table.unpack(r, 2, 13)),
 		v = Vector3.new(r[14], r[15], r[16]),
+		s = r[17],
+		mv = (#r >= 20) and Vector3.new(r[18], r[19], r[20]) or Vector3.zero,
+		j = (#r >= 21) and r[21] == 1 or false,
 		cam = (#r >= 34) and CFrame.new(table.unpack(r, 22, 33)) or nil,
 		fov = (#r >= 34) and r[34] or nil,
 	}
@@ -738,10 +767,26 @@ local function interpolate(t)
 	local span = math.max(b.t - a.t, 1e-5)
 	local p0, p1 = a.cf.Position, b.cf.Position
 	local delta = p1 - p0
-	local maxTangent = delta.Magnitude * 2.5 + 0.05
 	local m0, m1 = a.v * span, b.v * span
-	if m0.Magnitude > maxTangent then m0 = m0.Unit * maxTangent end
-	if m1.Magnitude > maxTangent then m1 = m1.Unit * maxTangent end
+	local chordLength = delta.Magnitude
+	if chordLength < 1e-4 then
+		m0, m1 = Vector3.zero, Vector3.zero
+	else
+		local direction = delta / chordLength
+		local along0, along1 = m0:Dot(direction), m1:Dot(direction)
+		if along0 < 0 then m0 -= direction * along0 end
+		if along1 < 0 then m1 -= direction * along1 end
+		local maxTangent = chordLength * 3
+		if m0.Magnitude > maxTangent then m0 = m0.Unit * maxTangent end
+		if m1.Magnitude > maxTangent then m1 = m1.Unit * maxTangent end
+		local alpha, beta = m0:Dot(direction) / chordLength, m1:Dot(direction) / chordLength
+		local tangentSum = alpha * alpha + beta * beta
+		if tangentSum > 9 then
+			local limiter = 3 / math.sqrt(tangentSum)
+			m0 *= limiter
+			m1 *= limiter
+		end
+	end
 	local k2, k3 = k * k, k * k * k
 	local pos = p0 * (2 * k3 - 3 * k2 + 1) + m0 * (k3 - 2 * k2 + k) + p1 * (-2 * k3 + 3 * k2) + m1 * (k3 - k2)
 	local vel = (p0 * (6 * k2 - 6 * k) + m0 * (3 * k2 - 4 * k + 1) + p1 * (-6 * k2 + 6 * k) + m1 * (3 * k2 - 2 * k)) / span
@@ -755,6 +800,7 @@ local controls = require(lp.PlayerScripts:WaitForChild("PlayerModule")):GetContr
 local prevAR, prevCam, prevFov = hum.AutoRotate, cam.CameraType, cam.FieldOfView
 controls:Disable()
 hum.AutoRotate = false
+local lastState
 local t, total = 0, frames[#frames].t
 local conn
 conn = RunService.PreSimulation:Connect(function(dt)
@@ -762,6 +808,11 @@ conn = RunService.PreSimulation:Connect(function(dt)
 	local cf, vel, a, b, k = interpolate(t)
 	root.CFrame = cf
 	root.AssemblyLinearVelocity = vel
+	hum.Jump = a.j == true
+	if a.s and a.s ~= lastState and a.s ~= 15 then
+		lastState = a.s
+		pcall(function() hum:ChangeState(Enum.HumanoidStateType:FromValue(a.s)) end)
+	end
 	if a.cam then
 		cam.CameraType = Enum.CameraType.Scriptable
 		cam.CFrame = (b and b.cam) and a.cam:Lerp(b.cam, k) or a.cam
@@ -914,7 +965,7 @@ local function deleteSelectedSave()
 end
 
 local host = (gethui and gethui()) or lp:WaitForChild("PlayerGui")
-local old = host:FindFirstChild("TASStudio")
+local old = host:FindFirstChild("cocosTAS")
 if old then old:Destroy() end
 
 local function mk(class, props, parent)
@@ -943,11 +994,11 @@ local function isMove(i)
 end
 
 local gui = mk("ScreenGui", {
-	Name = "TASStudio", ResetOnSpawn = false, IgnoreGuiInset = true,
+	Name = "cocosTAS", ResetOnSpawn = false, IgnoreGuiInset = true,
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999,
 }, host)
 
-local WIDTH, HEIGHT = 252, 222
+local WIDTH, HEIGHT = 252, 252
 local main = mk("Frame", {
 	Size = UDim2.fromOffset(WIDTH, HEIGHT), Position = UDim2.new(0, 10, 0, 10),
 	BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true,
@@ -985,6 +1036,91 @@ local function btn(par, txt, x, y, w, h, col, cb, size)
 end
 
 local minimized = false
+local wallhopEnabled = false
+local wallhopNext = 0
+local wallhopCooldown = 0.24
+local wallhopLostAt = 0
+local wallhopArmed = true
+local wallhopVerticalBoost = 31
+local wallhopPush = 11
+local wallhopMaxHorizontal = 42
+
+local function wallhopStep()
+	if not wallhopEnabled or S.mode == "play" or S.paused then return end
+	local character, humanoid, root = chr()
+	if not character or not humanoid or not root or humanoid.Health <= 0 then return end
+	if humanoid.FloorMaterial ~= Enum.Material.Air then
+		wallhopArmed = true
+		wallhopLostAt = 0
+		return
+	end
+	local state = humanoid:GetState()
+	if state ~= Enum.HumanoidStateType.Freefall and state ~= Enum.HumanoidStateType.Jumping then return end
+
+	local move = humanoid.MoveDirection
+	local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+	local forward = move.Magnitude > 0.12 and move.Unit or (look.Magnitude > 0.01 and look.Unit or Vector3.new(0, 0, -1))
+	local right = Vector3.new(-forward.Z, 0, forward.X)
+	local directions = {
+		forward, right, -right, -forward,
+		(forward + right).Unit, (forward - right).Unit,
+		(-forward + right).Unit, (-forward - right).Unit,
+	}
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+	params.IgnoreWater = true
+
+	local nearest
+	local heights = { 0.15, 0.95, 1.75 }
+	for _, height in ipairs(heights) do
+		local origin = root.Position + Vector3.new(0, height, 0)
+		for _, direction in ipairs(directions) do
+			local hit = workspace:Raycast(origin, direction * 2.9, params)
+			if hit and hit.Instance and hit.Instance.CanCollide and math.abs(hit.Normal.Y) < 0.25 then
+				if not nearest or hit.Distance < nearest.Distance then
+					nearest = hit
+				end
+			end
+		end
+	end
+
+	local now = os.clock()
+	if not nearest then
+		if wallhopLostAt == 0 then wallhopLostAt = now end
+		if now - wallhopLostAt >= 0.12 then wallhopArmed = true end
+		return
+	end
+
+	wallhopLostAt = 0
+	if not wallhopArmed or now < wallhopNext then return end
+
+	local away = Vector3.new(nearest.Normal.X, 0, nearest.Normal.Z)
+	if away.Magnitude < 0.1 then return end
+	away = away.Unit
+
+	local velocity = root.AssemblyLinearVelocity
+	local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+	local intoWall = horizontal:Dot(away)
+	if intoWall < 0 then
+		horizontal -= away * intoWall
+	end
+	horizontal += away * wallhopPush
+	if horizontal.Magnitude > wallhopMaxHorizontal then
+		horizontal = horizontal.Unit * wallhopMaxHorizontal
+	end
+
+	root.AssemblyLinearVelocity = Vector3.new(
+		horizontal.X,
+		math.max(velocity.Y, wallhopVerticalBoost),
+		horizontal.Z
+	)
+	humanoid.Jump = true
+	pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end)
+
+	wallhopArmed = false
+	wallhopNext = now + wallhopCooldown
+end
 local minimizeBtn = btn(title, "−", 198, 1, 22, 23, C.btn, function() end, 13)
 local activeTweens = {}
 local tweenInfo = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
@@ -1012,7 +1148,6 @@ local function animateMinimize(nextValue)
 end
 minimizeBtn.Activated:Connect(function() animateMinimize(not minimized) end)
 
-local menuManualVisible = true
 local savePanelOpen = false
 local floatControlsEnabled = true
 local W = {}
@@ -1109,8 +1244,15 @@ W.float = btn(body, "Пульт: ВКЛ", 169, 133, 75, 28, C.btn, function()
 	refreshUI()
 end, 9)
 
+W.wallhop = btn(body, "Wallhop helper: ВЫКЛ", 7, 166, 238, 27, C.btn, function()
+	wallhopEnabled = not wallhopEnabled
+	wallhopNext = 0
+	refreshUI()
+	notify(wallhopEnabled and "Wallhop helper включён" or "Wallhop helper выключен")
+end, 10)
+
 local msg = mk("TextLabel", {
-	Position = UDim2.fromOffset(7, 166), Size = UDim2.fromOffset(238, 25), TextWrapped = true,
+	Position = UDim2.fromOffset(7, 198), Size = UDim2.fromOffset(238, 25), TextWrapped = true,
 	TextYAlignment = Enum.TextYAlignment.Top, BackgroundTransparency = 1,
 	TextColor3 = C.ok, Font = Enum.Font.Gotham, TextSize = 10,
 	TextXAlignment = Enum.TextXAlignment.Left, Text = "Нажми REC, чтобы начать запись",
@@ -1191,7 +1333,7 @@ btn(savePanel, "Восстановить автосейв", 7, 235, 238, 19, C.b
 end, 9)
 
 local floatPanel = mk("Frame", {
-	Size = UDim2.fromOffset(228, 40), Position = UDim2.new(0.5, -114, 0.82, 0),
+	Size = UDim2.fromOffset(262, 40), Position = UDim2.new(0.5, -131, 0.82, 0),
 	BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true,
 }, gui)
 mk("UICorner", { CornerRadius = UDim.new(0, 9) }, floatPanel)
@@ -1205,9 +1347,16 @@ mk("UICorner", { CornerRadius = UDim.new(0, 6) }, dragGrip)
 btn(floatPanel, "−1с", 24, 5, 35, 30, C.btn, function() rewindSec(1) end, 10)
 btn(floatPanel, "−3с", 61, 5, 35, 30, C.btn, function() rewindSec(3) end, 10)
 W.floatPause = btn(floatPanel, "Ⅱ", 98, 5, 35, 30, C.on, togglePause, 12)
-btn(floatPanel, "◀", 135, 5, 35, 30, C.btn, function() stepFrame(-1) end, 12)
-btn(floatPanel, "▶", 172, 5, 35, 30, C.btn, function() stepFrame(1) end, 12)
-btn(floatPanel, "×", 207, 5, 18, 30, C.rec, function() floatControlsEnabled = false; refreshUI() end, 12)
+W.floatStop = btn(floatPanel, "■", 135, 5, 35, 30, C.rec, function()
+	if S.mode == "play" then
+		finishPlayback()
+	else
+		stopAll()
+	end
+end, 12)
+btn(floatPanel, "◀", 172, 5, 35, 30, C.btn, function() stepFrame(-1) end, 12)
+btn(floatPanel, "▶", 209, 5, 35, 30, C.btn, function() stepFrame(1) end, 12)
+btn(floatPanel, "×", 246, 5, 14, 30, C.rec, function() floatControlsEnabled = false; refreshUI() end, 12)
 
 do
 	local dragging = false
@@ -1246,9 +1395,10 @@ local function placeSavePanel()
 end
 
 local function syncUiVisibility()
-	local hideDuringPlayback = S.mode == "play" and not S.paused
-	main.Visible = menuManualVisible and not hideDuringPlayback
-	savePanel.Visible = savePanelOpen and not hideDuringPlayback
+	gui.Enabled = true
+	local playing = S.mode == "play" or playbackUiLocked
+	main.Visible = not playing and menuManualVisible
+	savePanel.Visible = not playing and savePanelOpen
 	floatPanel.Visible = floatControlsEnabled
 end
 
@@ -1327,9 +1477,25 @@ refreshUI = function()
 	W.float.BackgroundColor3 = floatControlsEnabled and C.on or C.btn
 	W.floatPause.Text = S.paused and "▶" or "Ⅱ"
 	W.floatPause.BackgroundColor3 = S.paused and C.on or C.btn
+	W.wallhop.Text = wallhopEnabled and "Wallhop helper: ВКЛ" or "Wallhop helper: ВЫКЛ"
+	W.wallhop.BackgroundColor3 = wallhopEnabled and C.on or C.btn
 	progFill.Size = UDim2.fromScale(totalTime() > 0 and math.clamp(S.gt / totalTime(), 0, 1) or 0, 1)
 	syncUiVisibility()
 	if savePanelOpen then placeSavePanel() end
+end
+
+finishPlayback = function()
+	if S.mode ~= "play" then return end
+	stopAll(true)
+	notify("Воспроизведение завершено")
+	local token = playbackHideToken
+	task.delay(5, function()
+		if token == playbackHideToken and S.mode ~= "play" then
+			playbackUiLocked = false
+			menuManualVisible = true
+			if refreshUI then refreshUI() end
+		end
+	end)
 end
 
 local function hint()
@@ -1347,6 +1513,7 @@ end
 local acc, partAcc, autoAcc = 0, 0, 0
 conns[#conns + 1] = RunService.PreSimulation:Connect(function(dt)
 	applySlow()
+	wallhopStep()
 
 	if S.stepReq == 1 then
 		local _, _, r = chr()
@@ -1368,7 +1535,7 @@ conns[#conns + 1] = RunService.PreSimulation:Connect(function(dt)
 		else
 			S.gt = total
 			applyAt(S.gt)
-			setPaused(true)
+			finishPlayback()
 			return
 		end
 	elseif S.gt <= 0 and S.rev then
@@ -1377,7 +1544,7 @@ conns[#conns + 1] = RunService.PreSimulation:Connect(function(dt)
 		else
 			S.gt = 0
 			applyAt(S.gt)
-			setPaused(true)
+			finishPlayback()
 			return
 		end
 	end
@@ -1431,7 +1598,7 @@ conns[#conns + 1] = RunService.PostSimulation:Connect(function(dt)
 		acc = 0
 		local total = totalTime()
 		local m = ({ idle = "ожидание", record = "ЗАПИСЬ", play = "ВОСПРОИЗВЕДЕНИЕ" })[S.mode]
-		status.Text = ("%s%s\nt = %.2f / %.2f c  |  сэмплов: %d  |  0.5 шага  |  x%.2f%s"):format(m, S.paused and " (пауза)" or "", S.gt, total, #S.frames, S.scale, S.bestTime and ("  ⭐%.2f"):format(S.bestTime) or "")
+		status.Text = ("%s%s\nt = %.2f / %.2f c  |  кадров: %d  |  x%.2f%s"):format(m, S.paused and " (пауза)" or "", S.gt, total, #S.frames, S.scale, S.bestTime and ("  ⭐%.2f"):format(S.bestTime) or "")
 		progFill.Size = UDim2.fromScale(total > 0 and math.clamp(S.gt / total, 0, 1) or 0, 1)
 
 		if S.trail then
@@ -1510,7 +1677,8 @@ conns[#conns + 1] = UIS.InputBegan:Connect(function(i, gp)
 	if gp or UIS:GetFocusedTextBox() then return end
 	local k = i.KeyCode
 	if k == Enum.KeyCode.R then toggleRec()
-	elseif k == Enum.KeyCode.P then togglePlay()
+	elseif k == Enum.KeyCode.P then
+		if S.mode == "play" then togglePause() else togglePlay() end
 	elseif k == Enum.KeyCode.O then stopAll()
 	elseif k == Enum.KeyCode.Comma then stepFrame(-1)
 	elseif k == Enum.KeyCode.Period then stepFrame(1)

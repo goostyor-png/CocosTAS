@@ -43,6 +43,7 @@ local S = {
 	ar = true,
 	lastState = nil,
 	stepReq = 0,
+	stepRemaining = 0,
 	ghostFrames = nil,
 	camPrev = nil,
 	camFovPrev = nil,
@@ -447,13 +448,20 @@ local function stepFrame(dir)
 	if S.stepReq ~= 0 then return end
 	if S.mode == "record" then
 		if not S.paused then setPaused(true) end
-		if dir > 0 then S.stepReq = 1 else rewindToIndex(#S.frames - 1, true) end
+		if dir > 0 then
+			S.stepRemaining = 3
+			S.stepReq = 1
+		else
+			rewindToIndex(#S.frames - 3, true)
+		end
 		return
 	end
 	if #S.frames == 0 then return end
 	if S.mode ~= "play" then startPlay(true) end
 	if not S.paused then setPaused(true) end
-	S.gt = math.clamp(S.gt + dir / 60, 0, totalTime())
+	local _, _, _, index = sample(S.frames, S.gt)
+	index = math.clamp((index or 1) + dir * 3, 1, #S.frames)
+	S.gt = S.frames[index].t
 	applyAt(S.gt)
 end
 
@@ -1041,7 +1049,6 @@ local wallhopNext = 0
 local wallhopCooldown = 0.24
 local wallhopLostAt = 0
 local wallhopArmed = true
-local wallhopVerticalBoost = 31
 local wallhopPush = 11
 local wallhopMaxHorizontal = 42
 
@@ -1112,11 +1119,9 @@ local function wallhopStep()
 
 	root.AssemblyLinearVelocity = Vector3.new(
 		horizontal.X,
-		math.max(velocity.Y, wallhopVerticalBoost),
+		velocity.Y,
 		horizontal.Z
 	)
-	humanoid.Jump = true
-	pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end)
 
 	wallhopArmed = false
 	wallhopNext = now + wallhopCooldown
@@ -1344,8 +1349,8 @@ local dragGrip = mk("TextButton", {
 	Font = Enum.Font.GothamBold, TextSize = 16, BorderSizePixel = 0,
 }, floatPanel)
 mk("UICorner", { CornerRadius = UDim.new(0, 6) }, dragGrip)
-btn(floatPanel, "−1с", 24, 5, 35, 30, C.btn, function() rewindSec(1) end, 10)
-btn(floatPanel, "−3с", 61, 5, 35, 30, C.btn, function() rewindSec(3) end, 10)
+btn(floatPanel, "−0.2с", 24, 5, 35, 30, C.btn, function() rewindSec(0.2) end, 9)
+btn(floatPanel, "−0.4с", 61, 5, 35, 30, C.btn, function() rewindSec(0.4) end, 9)
 W.floatPause = btn(floatPanel, "Ⅱ", 98, 5, 35, 30, C.on, togglePause, 12)
 W.floatStop = btn(floatPanel, "■", 135, 5, 35, 30, C.rec, function()
 	if S.mode == "play" then
@@ -1500,7 +1505,7 @@ end
 
 local function hint()
 	if S.mode == "record" then
-		if S.paused then return "⏸ Пауза. Жми «кадр ▶» (по одному кадру) или ⏸ ещё раз, чтобы продолжить запись." end
+		if S.paused then return "⏸ Пауза. Жми «кадр ▶» (по 3 кадра) или ⏸ ещё раз, чтобы продолжить запись." end
 		return "Идёт запись. Для повтора используй откат или покадровый шаг."
 	elseif S.mode == "play" then
 		if S.paused then return "Пауза. Тапни по полосе выше для перемотки или нажми кадр для точного шага." end
@@ -1562,7 +1567,8 @@ conns[#conns + 1] = RunService.PostSimulation:Connect(function(dt)
 			S.gt += dt * S.scale
 			pushFrame(h, r, v)
 		end
-		S.stepReq = 0
+		S.stepRemaining -= 1
+		S.stepReq = S.stepRemaining > 0 and 1 or 0
 	elseif S.mode == "record" and not S.paused then
 		local _, h, r = chr()
 		if r then
@@ -1682,8 +1688,8 @@ conns[#conns + 1] = UIS.InputBegan:Connect(function(i, gp)
 	elseif k == Enum.KeyCode.O then stopAll()
 	elseif k == Enum.KeyCode.Comma then stepFrame(-1)
 	elseif k == Enum.KeyCode.Period then stepFrame(1)
-	elseif k == Enum.KeyCode.Z then rewindSec(1)
-	elseif k == Enum.KeyCode.X then rewindSec(3)
+	elseif k == Enum.KeyCode.Z then rewindSec(0.2)
+	elseif k == Enum.KeyCode.X then rewindSec(0.4)
 	elseif k == Enum.KeyCode.F1 then
 		menuManualVisible = not menuManualVisible
 		syncUiVisibility()

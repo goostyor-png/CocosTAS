@@ -13,6 +13,8 @@ local CFG = {
 	DeathRewind = 2,
 	TrailStep = 0.12,
 	TrailMax = 500,
+	AnimRef = 16,
+	UndoMax = 20,
 }
 
 local S = {
@@ -72,6 +74,7 @@ local function copyFrames(f) return table.move(f, 1, #f, 1, {}) end
 
 local function snapshot()
 	S.undo[#S.undo + 1] = copyFrames(S.frames)
+	while #S.undo > CFG.UndoMax do table.remove(S.undo, 1) end
 end
 
 local function setControls(on)
@@ -204,6 +207,23 @@ local function trackScale(t, mult)
 	t:AdjustSpeed(v)
 end
 
+local function isLoco(t)
+	local n = string.lower(t.Name)
+	return n:find("walk", 1, true) ~= nil or n:find("run", 1, true) ~= nil
+end
+
+local function playAnim(h, v, rate)
+	if S.paused then return end
+	local an = h:FindFirstChildOfClass("Animator")
+	if not an then return end
+	local hs = Vector3.new(v.X, 0, v.Z).Magnitude * math.abs(rate)
+	if hs < 0.75 then return end
+	local sp = hs / CFG.AnimRef
+	for _, t in ipairs(an:GetPlayingAnimationTracks()) do
+		if isLoco(t) then t:AdjustSpeed(sp) end
+	end
+end
+
 local function setParticles()
 	local ts = (S.paused and S.stepReq == 0) and 0 or S.scale
 	for _, d in ipairs(workspace:GetDescendants()) do
@@ -231,7 +251,11 @@ local function applySlow()
 			local an = h:FindFirstChildOfClass("Animator")
 			if an then
 				for _, t in ipairs(an:GetPlayingAnimationTracks()) do
-					trackScale(t, animPaused and 0 or s)
+					if S.mode == "play" and isLoco(t) then
+						if animPaused then t:AdjustSpeed(0) end
+					else
+						trackScale(t, animPaused and 0 or s)
+					end
 				end
 			end
 		end
@@ -285,7 +309,7 @@ local function applyAt(t)
 	if not cf then return end
 	local _, h, r = chr()
 	if not r then return end
-	local rate = (S.mode == "play" and CFG.PlayMuls[S.pmulIdx] or 1)
+	local rate = S.scale * (S.mode == "play" and CFG.PlayMuls[S.pmulIdx] or 1)
 	if S.rev then rate = -rate end
 	r.CFrame = cf
 	local scaledVelocity = v * rate
@@ -296,6 +320,7 @@ local function applyAt(t)
 			S.lastState = a.s
 			pcall(function() h:ChangeState(Enum.HumanoidStateType:FromValue(a.s)) end)
 		end
+		if S.mode == "play" then playAnim(h, v, rate) end
 	end
 end
 
@@ -303,7 +328,7 @@ local function pushFrame(h, r, vreal)
 	local fr = {
 		t = S.gt,
 		cf = r.CFrame,
-		v = (vreal or r.AssemblyLinearVelocity),
+		v = (vreal or r.AssemblyLinearVelocity) / math.max(S.scale, CFG.MinScale),
 		s = h:GetState().Value,
 		mv = h.MoveDirection,
 		j = h.Jump,
@@ -436,7 +461,7 @@ local function recordFromHere()
 	S.mode = "record"
 	S.stepReq = 0
 	local _, baseVelocity = interpolate(S.frames, S.gt)
-	if baseVelocity then S.pv = baseVelocity end
+	if baseVelocity then S.pv = baseVelocity * S.scale end
 	if h then h.AutoRotate = S.ar end
 	setControls(true)
 	restoreCam()
@@ -468,7 +493,7 @@ end
 local function saveSlot(n)
 	local _, h, r = chr()
 	if not r then return end
-	local v = (S.paused and S.pv or r.AssemblyLinearVelocity)
+	local v = (S.paused and S.pv or r.AssemblyLinearVelocity) / S.scale
 	S.slots[n] = { cf = r.CFrame, v = v, t = S.gt, idx = #S.frames, fr = S.frames[#S.frames], st = h:GetState().Value }
 	notify("Слот " .. n .. " сохранён")
 end
@@ -490,7 +515,7 @@ local function loadSlot(n)
 		applyAt(S.gt)
 	else
 		r.CFrame = s.cf
-		r.AssemblyLinearVelocity = s.v
+		r.AssemblyLinearVelocity = s.v * S.scale
 	end
 end
 
@@ -1533,7 +1558,7 @@ conns[#conns + 1] = RunService.PreSimulation:Connect(function(dt)
 	end
 	if S.mode ~= "play" or S.paused then return end
 	local total = totalTime()
-	S.gt += dt * curMul() * (S.rev and -1 or 1)
+	S.gt += dt * S.scale * curMul() * (S.rev and -1 or 1)
 	if S.gt >= total then
 		if S.loop and not S.rev then
 			S.gt = 0
@@ -1564,7 +1589,7 @@ conns[#conns + 1] = RunService.PostSimulation:Connect(function(dt)
 			S.pv = v
 			r.Anchored = true
 			r.AssemblyLinearVelocity = Vector3.zero
-			S.gt += dt
+			S.gt += dt * S.scale
 			pushFrame(h, r, v)
 		end
 		S.stepRemaining -= 1
@@ -1572,7 +1597,7 @@ conns[#conns + 1] = RunService.PostSimulation:Connect(function(dt)
 	elseif S.mode == "record" and not S.paused then
 		local _, h, r = chr()
 		if r then
-			S.gt += dt
+			S.gt += dt * S.scale
 			pushFrame(h, r)
 		end
 	end

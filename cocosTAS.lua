@@ -1569,7 +1569,8 @@ conns[#conns + 1] = RunService.PreSimulation:Connect(function(dt)
 	end
 	if S.mode ~= "play" or S.paused then return end
 	local total = totalTime()
-	S.gt += dt * S.scale * curMul() * (S.rev and -1 or 1)
+	-- Playback timeline is independent from the recording Slow Motion scale.
+	S.gt += dt * curMul() * (S.rev and -1 or 1)
 	if S.gt >= total then
 		if S.loop and not S.rev then
 			S.gt = 0

@@ -52,7 +52,7 @@ local S = {
 	dead = false,
 }
 local conns = {}
-local refreshUI, notify, refreshSaveList, finishPlayback
+local refreshUI, notify, refreshSaveList, finishPlayback, syncUiVisibility
 local menuManualVisible = true
 local playbackUiLocked = false
 local playbackHideToken = 0
@@ -1184,7 +1184,13 @@ local W = {}
 local mainClose = btn(title, "×", 224, 1, 24, 23, C.rec, function()
 	menuManualVisible = false
 	main.Visible = false
+	if syncUiVisibility then syncUiVisibility() end
 end, 14)
+local reopenBtn = btn(gui, "ОТКРЫТЬ TAS", 10, 10, 112, 30, C.on, function()
+	menuManualVisible = true
+	if syncUiVisibility then syncUiVisibility() end
+end, 10)
+reopenBtn.Visible = false
 
 local status = mk("TextLabel", {
 	Position = UDim2.fromOffset(7, 3), Size = UDim2.fromOffset(238, 21), BackgroundTransparency = 1,
@@ -1424,10 +1430,11 @@ local function placeSavePanel()
 	savePanel.Position = UDim2.fromOffset(x, y)
 end
 
-local function syncUiVisibility()
+syncUiVisibility = function()
 	gui.Enabled = true
 	local playing = S.mode == "play" or playbackUiLocked
 	main.Visible = not playing and menuManualVisible
+	reopenBtn.Visible = not playing and not menuManualVisible
 	savePanel.Visible = not playing and savePanelOpen
 	floatPanel.Visible = floatControlsEnabled
 end

@@ -38,8 +38,6 @@ local S = {
 	slots = {},
 	cp = nil,
 	undo = {},
-	undoLegacy = {},
-	legacyFrames = false,
 	pv = Vector3.zero,
 	pa = false,
 	ar = true,
@@ -54,7 +52,6 @@ local S = {
 local conns = {}
 local refreshUI, notify, refreshSaveList, finishPlayback
 local menuManualVisible = true
-local menuForceVisible = false
 local playbackUiLocked = false
 local playbackHideToken = 0
 
@@ -75,7 +72,6 @@ local function copyFrames(f) return table.move(f, 1, #f, 1, {}) end
 
 local function snapshot()
 	S.undo[#S.undo + 1] = copyFrames(S.frames)
-	S.undoLegacy[#S.undoLegacy + 1] = S.legacyFrames
 end
 
 local function setControls(on)
@@ -289,14 +285,13 @@ local function applyAt(t)
 	if not cf then return end
 	local _, h, r = chr()
 	if not r then return end
-	local rate = S.scale * (S.mode == "play" and CFG.PlayMuls[S.pmulIdx] or 1)
+	local rate = (S.mode == "play" and CFG.PlayMuls[S.pmulIdx] or 1)
 	if S.rev then rate = -rate end
 	r.CFrame = cf
 	local scaledVelocity = v * rate
 	if S.paused then S.pv = scaledVelocity else r.AssemblyLinearVelocity = scaledVelocity end
 	if h then
 		h.Jump = a.j == true
-		h:Move(a.mv or Vector3.zero, false)
 		if a.s ~= S.lastState and a.s ~= 15 then
 			S.lastState = a.s
 			pcall(function() h:ChangeState(Enum.HumanoidStateType:FromValue(a.s)) end)
@@ -308,7 +303,7 @@ local function pushFrame(h, r, vreal)
 	local fr = {
 		t = S.gt,
 		cf = r.CFrame,
-		v = vreal or r.AssemblyLinearVelocity,
+		v = (vreal or r.AssemblyLinearVelocity),
 		s = h:GetState().Value,
 		mv = h.MoveDirection,
 		j = h.Jump,
@@ -333,7 +328,6 @@ local function stopAll(keepPlaybackUIHidden)
 			playbackHideToken += 1
 			playbackUiLocked = false
 			menuManualVisible = true
-			menuForceVisible = false
 		end
 	end
 	restoreCam()
@@ -345,7 +339,6 @@ local function startRecord()
 	playbackHideToken += 1
 	playbackUiLocked = false
 	menuManualVisible = true
-	menuForceVisible = false
 	local _, h, r = chr()
 	if not r then return notify("Нет персонажа") end
 	if S.mode ~= "idle" then stopAll() end
@@ -354,7 +347,6 @@ local function startRecord()
 		S.ghostFrames = copyFrames(S.frames)
 	end
 	S.frames = {}
-	S.legacyFrames = false
 	S.gt = 0
 	S.mA, S.mB = nil, nil
 	S.mode = "record"
@@ -370,7 +362,6 @@ local function startPlay(paused)
 		if S.paused then setPaused(false) end
 		playbackHideToken += 1
 		playbackUiLocked = true
-		menuForceVisible = false
 		S.mode = "play"
 		local _, h = chr()
 		if h then S.ar = h.AutoRotate; h.AutoRotate = false end
@@ -413,7 +404,7 @@ local function rewindToIndex(i, quiet)
 	local _, _, r = chr()
 	if r then
 		r.CFrame = fr.cf
-		S.pv = fr.v * (S.legacyFrames and S.scale or 1)
+		S.pv = fr.v * S.scale
 	end
 end
 
@@ -436,15 +427,6 @@ local function recordFromHere()
 	local _, _, _, i = sample(S.frames, S.gt)
 	for k = #S.frames, i + 1, -1 do S.frames[k] = nil end
 	S.gt = S.frames[i].t
-	if S.legacyFrames then
-		local conversionScale = math.max(S.scale, CFG.MinScale)
-		for _, fr in ipairs(S.frames) do
-			fr.t = fr.t / conversionScale
-			fr.v *= conversionScale
-		end
-		S.gt /= conversionScale
-		S.legacyFrames = false
-	end
 	applyAt(S.gt)
 	local _, h = chr()
 	setPaused(true)
@@ -454,7 +436,7 @@ local function recordFromHere()
 	S.mode = "record"
 	S.stepReq = 0
 	local _, baseVelocity = interpolate(S.frames, S.gt)
-	if baseVelocity then S.pv = baseVelocity * S.scale end
+	if baseVelocity then S.pv = baseVelocity end
 	if h then h.AutoRotate = S.ar end
 	setControls(true)
 	restoreCam()
@@ -486,7 +468,7 @@ end
 local function saveSlot(n)
 	local _, h, r = chr()
 	if not r then return end
-	local v = (S.paused and S.pv or r.AssemblyLinearVelocity) / (S.legacyFrames and S.scale or 1)
+	local v = (S.paused and S.pv or r.AssemblyLinearVelocity)
 	S.slots[n] = { cf = r.CFrame, v = v, t = S.gt, idx = #S.frames, fr = S.frames[#S.frames], st = h:GetState().Value }
 	notify("Слот " .. n .. " сохранён")
 end
@@ -508,7 +490,7 @@ local function loadSlot(n)
 		applyAt(S.gt)
 	else
 		r.CFrame = s.cf
-		r.AssemblyLinearVelocity = s.v * (S.legacyFrames and S.scale or 1)
+		r.AssemblyLinearVelocity = s.v
 	end
 end
 
@@ -586,7 +568,6 @@ local function doUndo()
 	if #S.undo == 0 then return notify("Undo пуст") end
 	if S.mode == "record" then S.mode = "idle"; S.stepReq = 0 end
 	S.frames = table.remove(S.undo)
-	S.legacyFrames = table.remove(S.undoLegacy) or false
 	S.gt = math.clamp(S.gt, 0, totalTime())
 	S.mA, S.mB = nil, nil
 	if S.mode == "play" then applyAt(S.gt) end
@@ -596,7 +577,7 @@ end
 local function clearAll()
 	stopAll()
 	if #S.frames > 0 then snapshot() end
-	S.frames = {}; S.legacyFrames = false; S.gt = 0; S.mA, S.mB = nil, nil
+	S.frames = {}; S.gt = 0; S.mA, S.mB = nil, nil
 	notify("Запись очищена (Undo вернёт)")
 end
 
@@ -690,7 +671,7 @@ local function r3(x)
 end
 
 local function serialize()
-	local out = { v = S.legacyFrames and 4 or 5, f = {} }
+	local out = { v = 4, f = {} }
 	for i, fr in ipairs(S.frames) do
 		local c = { fr.cf:GetComponents() }
 		local row = { r3(fr.t) }
@@ -754,7 +735,6 @@ local function deserialize(str)
 	if S.mode ~= "idle" then stopAll() end
 	if #S.frames > 0 then snapshot() end
 	S.frames = frames
-	S.legacyFrames = (tonumber(data.v) or 4) < 5
 	S.gt = 0
 	S.mA, S.mB = nil, nil
 	return true
@@ -837,7 +817,6 @@ conn = RunService.PreSimulation:Connect(function(dt)
 	root.CFrame = cf
 	root.AssemblyLinearVelocity = vel
 	hum.Jump = a.j == true
-	hum:Move(a.mv or Vector3.zero, false)
 	if a.s and a.s ~= lastState and a.s ~= 15 then
 		lastState = a.s
 		pcall(function() hum:ChangeState(Enum.HumanoidStateType:FromValue(a.s)) end)
@@ -1176,16 +1155,10 @@ minimizeBtn.Activated:Connect(function() animateMinimize(not minimized) end)
 
 local savePanelOpen = false
 local floatControlsEnabled = true
-local reopenButton
 local W = {}
 local mainClose = btn(title, "×", 224, 1, 24, 23, C.rec, function()
 	menuManualVisible = false
-	menuForceVisible = false
-	savePanelOpen = false
-	if refreshUI then refreshUI() else
-		main.Visible = false
-		if reopenButton then reopenButton.Visible = true end
-	end
+	main.Visible = false
 end, 14)
 
 local status = mk("TextLabel", {
@@ -1426,20 +1399,12 @@ local function placeSavePanel()
 	savePanel.Position = UDim2.fromOffset(x, y)
 end
 
-reopenButton = btn(gui, "TAS", 10, 10, 44, 30, C.on, function()
-	menuManualVisible = true
-	menuForceVisible = true
-	refreshUI()
-end, 11)
-reopenButton.Visible = false
-
 local function syncUiVisibility()
 	gui.Enabled = true
 	local playing = S.mode == "play" or playbackUiLocked
-	main.Visible = menuManualVisible and (not playing or menuForceVisible)
-	savePanel.Visible = main.Visible and savePanelOpen
+	main.Visible = not playing and menuManualVisible
+	savePanel.Visible = not playing and savePanelOpen
 	floatPanel.Visible = floatControlsEnabled
-	if reopenButton then reopenButton.Visible = not main.Visible end
 end
 
 local titleDragging, titleStart, titleOrigin = false, nil, nil
@@ -1533,7 +1498,6 @@ finishPlayback = function()
 		if token == playbackHideToken and S.mode ~= "play" then
 			playbackUiLocked = false
 			menuManualVisible = true
-			menuForceVisible = false
 			if refreshUI then refreshUI() end
 		end
 	end)
@@ -1544,11 +1508,11 @@ local function hint()
 		if S.paused then return "⏸ Пауза. Жми «кадр ▶» (по 3 кадра) или ⏸ ещё раз, чтобы продолжить запись." end
 		return "Идёт запись. Для повтора используй откат или покадровый шаг."
 	elseif S.mode == "play" then
-		if S.paused then return "Пауза. Тапни по полосе выше для перемотки или нажми кадр для точного шага. TAS / F1 — меню." end
-		return "Воспроизведение. TAS / F1 — вернуть меню."
+		if S.paused then return "Пауза. Тапни по полосе выше для перемотки или нажми кадр для точного шага." end
+		return "Воспроизведение. Меню временно скрыто."
 	end
-	if #S.frames == 0 then return "Нажми ⏺ и пройди свою трассу. TAS / F1 — вернуть меню." end
-	return "Запись готова: ▶ просмотр или СОХРАНЕНИЯ. TAS / F1 — меню."
+	if #S.frames == 0 then return "Нажми ⏺ и пройди свою трассу. Остальное потом." end
+	return "Запись готова: ▶ просмотр или СОХРАНЕНИЯ."
 end
 
 local acc, partAcc, autoAcc = 0, 0, 0
@@ -1569,7 +1533,6 @@ conns[#conns + 1] = RunService.PreSimulation:Connect(function(dt)
 	end
 	if S.mode ~= "play" or S.paused then return end
 	local total = totalTime()
-	-- Playback timeline is independent from the recording Slow Motion scale.
 	S.gt += dt * curMul() * (S.rev and -1 or 1)
 	if S.gt >= total then
 		if S.loop and not S.rev then
@@ -1601,7 +1564,6 @@ conns[#conns + 1] = RunService.PostSimulation:Connect(function(dt)
 			S.pv = v
 			r.Anchored = true
 			r.AssemblyLinearVelocity = Vector3.zero
-			-- Keep the recorder clock independent from S.scale: slow motion changes the world, not elapsed real time.
 			S.gt += dt
 			pushFrame(h, r, v)
 		end
@@ -1610,7 +1572,6 @@ conns[#conns + 1] = RunService.PostSimulation:Connect(function(dt)
 	elseif S.mode == "record" and not S.paused then
 		local _, h, r = chr()
 		if r then
-			-- Real-time timestamps make a 0.50x recording replay correctly at 1.00x.
 			S.gt += dt
 			pushFrame(h, r)
 		end
@@ -1730,10 +1691,8 @@ conns[#conns + 1] = UIS.InputBegan:Connect(function(i, gp)
 	elseif k == Enum.KeyCode.Z then rewindSec(0.2)
 	elseif k == Enum.KeyCode.X then rewindSec(0.4)
 	elseif k == Enum.KeyCode.F1 then
-		local shouldOpen = not main.Visible
-		menuManualVisible = shouldOpen
-		menuForceVisible = shouldOpen
-		refreshUI()
+		menuManualVisible = not menuManualVisible
+		syncUiVisibility()
 	end
 end)
 
